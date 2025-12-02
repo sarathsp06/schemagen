@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== SchemaGen Examples ===\n")
+	fmt.Println("=== SchemaGen Examples ===")
 
 	// Example 1: Simple User Object
 	example1()

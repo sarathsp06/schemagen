@@ -184,42 +184,6 @@ if err != nil {
 fmt.Println(string(jsonBytes))
 ```
 
-### Using Enums and Constants
-
-```go
-schema := `{
-    "type": "object",
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": ["active", "inactive", "pending"]
-        },
-        "version": {
-            "type": "string",
-            "const": "1.0.0"
-        }
-    }
-}`
-```
-
-### Pattern-Based Strings
-
-```go
-schema := `{
-    "type": "object",
-    "properties": {
-        "zipcode": {
-            "type": "string",
-            "pattern": "^[0-9]{5}$"
-        },
-        "phone": {
-            "type": "string",
-            "pattern": "^\\+1-[0-9]{3}-[0-9]{3}-[0-9]{4}$"
-        }
-    }
-}`
-```
-
 ### Deterministic Generation for Testing
 
 ```go
@@ -278,80 +242,6 @@ if err != nil {
 }
 ```
 
-## API Reference
-
-### Generator
-
-```go
-type Generator struct {
-    MaxDepth          int
-    Seed              int64
-    GenerateAllFields bool
-}
-```
-
-#### Methods
-
-##### `NewGenerator() *Generator`
-
-Creates a new Generator with default settings.
-
-##### `SetSeed(seed int64) *Generator`
-
-Sets a specific seed for deterministic generation. Returns the generator for method chaining.
-
-##### `SetMaxDepth(depth int) *Generator`
-
-Sets the maximum recursion depth for nested objects. Returns the generator for method chaining.
-
-##### `SetGenerateAllFields(all bool) *Generator`
-
-Controls whether to generate all fields or just required ones. Returns the generator for method chaining.
-
-##### `Generate(schemaJSON []byte) (interface{}, error)`
-
-Generates random JSON data conforming to the schema. Returns a Go interface{} (typically map or slice).
-
-##### `GenerateBytes(schemaJSON []byte) ([]byte, error)`
-
-Generates random JSON data and returns it as JSON bytes.
-
-### Schema
-
-The `Schema` struct represents a parsed JSON Schema with full support for:
-- Meta properties (type, title)
-- Validation keywords (min/max, length, patterns)
-- Structural properties (properties, items)
-- Composition (oneOf, anyOf, allOf)
-
-### Helper Functions
-
-##### `ParseSchema(schemaJSON []byte) (*Schema, error)`
-
-Parses a JSON Schema from bytes into a Schema struct.
-
-## Implementation Details
-
-### Recursion and Depth Limiting
-
-The generator uses depth-first recursion to generate nested structures. The `MaxDepth` setting prevents stack overflow with deeply nested or circular schemas.
-
-### Random Data Generation
-
-- **Numbers**: Generated within specified bounds using `math/rand`
-- **Strings**: Generated using [gofakeit](https://github.com/brianvoe/gofakeit) for realistic data
-- **Patterns**: Uses [reggen](https://github.com/lucasjones/reggen) to generate strings matching regex patterns
-- **Formats**: Uses gofakeit's built-in format generators (email, UUID, etc.)
-
-### Constraint Satisfaction
-
-The generator respects all specified constraints:
-- String length bounds are strictly enforced
-- Number ranges are inclusive/exclusive as specified
-- MultipleOf constraints align generated numbers
-- Required fields are always generated
-- Enum/const values are exactly matched
-
 ## Limitations
 
 ### Current Limitations
@@ -400,9 +290,6 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 4. Ensure all tests pass
 5. Submit a pull request
 
-## License
-
-MIT License - See LICENSE file for details
 
 ## Roadmap
 
@@ -416,7 +303,7 @@ Future enhancements planned:
 - [ ] CLI tool for generating test data
 
 ## Credits
-
 Built with:
+
 - [gofakeit](https://github.com/brianvoe/gofakeit) by Brian Voelker
 - [reggen](https://github.com/lucasjones/reggen) by Lucas Jones
