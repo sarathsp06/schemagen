@@ -3,7 +3,22 @@ package schemagen
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 )
+
+// ValidationError represents a schema validation error with context
+type ValidationError struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+	Value   interface{} `json:"value,omitempty"`
+}
+
+func (ve ValidationError) Error() string {
+	if ve.Path != "" {
+		return fmt.Sprintf("validation error at %s: %s", ve.Path, ve.Message)
+	}
+	return ve.Message
+}
 
 // Schema represents a JSON Schema with support for Draft 2020-12 and Draft-07
 type Schema struct {
@@ -91,12 +106,7 @@ func (s *StringOrArray) Contains(typeName string) bool {
 	if !s.IsArray {
 		return s.Single == typeName
 	}
-	for _, t := range s.Multiple {
-		if t == typeName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.Multiple, typeName)
 }
 
 // GetTypes returns all types as a slice
@@ -127,35 +137,85 @@ func ParseSchema(schemaJSON []byte) (*Schema, error) {
 	return &schema, nil
 }
 
-// Validate performs basic validation on the schema constraints
+// Validate performs comprehensive validation on the schema constraints
 func (s *Schema) Validate() error {
+	errors := s.ValidateWithDetails("")
+	if len(errors) > 0 {
+		// Return first error for backward compatibility
+		return errors[0]
+	}
+	return nil
+}
+
+// ValidateWithDetails performs comprehensive validation and returns all errors with path context
+func (s *Schema) ValidateWithDetails(basePath string) []ValidationError {
+	var errors []ValidationError
+
 	// Check for impossible number constraints
 	if s.Minimum != nil && s.Maximum != nil {
 		if *s.Minimum > *s.Maximum {
-			return fmt.Errorf("minimum (%f) cannot be greater than maximum (%f)", *s.Minimum, *s.Maximum)
+			errors = append(errors, ValidationError{
+				Path:    basePath,
+				Message: fmt.Sprintf("minimum (%f) cannot be greater than maximum (%f)", *s.Minimum, *s.Maximum),
+			})
 		}
 	}
 
 	if s.ExclusiveMinimum != nil && s.ExclusiveMaximum != nil {
 		if *s.ExclusiveMinimum >= *s.ExclusiveMaximum {
-			return fmt.Errorf("exclusiveMinimum (%f) must be less than exclusiveMaximum (%f)",
-				*s.ExclusiveMinimum, *s.ExclusiveMaximum)
+			errors = append(errors, ValidationError{
+				Path:    basePath,
+				Message: fmt.Sprintf("exclusiveMinimum (%f) must be less than exclusiveMaximum (%f)", *s.ExclusiveMinimum, *s.ExclusiveMaximum),
+			})
 		}
 	}
 
 	// Check for impossible string length constraints
 	if s.MinLength != nil && s.MaxLength != nil {
 		if *s.MinLength > *s.MaxLength {
-			return fmt.Errorf("minLength (%d) cannot be greater than maxLength (%d)", *s.MinLength, *s.MaxLength)
+			errors = append(errors, ValidationError{
+				Path:    basePath,
+				Message: fmt.Sprintf("minLength (%d) cannot be greater than maxLength (%d)", *s.MinLength, *s.MaxLength),
+			})
 		}
 	}
 
 	// Check for impossible array length constraints
 	if s.MinItems != nil && s.MaxItems != nil {
 		if *s.MinItems > *s.MaxItems {
-			return fmt.Errorf("minItems (%d) cannot be greater than maxItems (%d)", *s.MinItems, *s.MaxItems)
+			errors = append(errors, ValidationError{
+				Path:    basePath,
+				Message: fmt.Sprintf("minItems (%d) cannot be greater than maxItems (%d)", *s.MinItems, *s.MaxItems),
+			})
 		}
 	}
 
-	return nil
+	// Validate nested schemas
+	for propName, propSchema := range s.Properties {
+		propPath := basePath
+		if propPath == "" {
+			propPath = propName
+		} else {
+			propPath = propPath + "." + propName
+		}
+		errors = append(errors, propSchema.ValidateWithDetails(propPath)...)
+	}
+
+	// Validate composition schemas
+	for i, schema := range s.OneOf {
+		schemaPath := fmt.Sprintf("%s.oneOf[%d]", basePath, i)
+		errors = append(errors, schema.ValidateWithDetails(schemaPath)...)
+	}
+
+	for i, schema := range s.AnyOf {
+		schemaPath := fmt.Sprintf("%s.anyOf[%d]", basePath, i)
+		errors = append(errors, schema.ValidateWithDetails(schemaPath)...)
+	}
+
+	for i, schema := range s.AllOf {
+		schemaPath := fmt.Sprintf("%s.allOf[%d]", basePath, i)
+		errors = append(errors, schema.ValidateWithDetails(schemaPath)...)
+	}
+
+	return errors
 }

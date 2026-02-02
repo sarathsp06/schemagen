@@ -1,6 +1,7 @@
 package schemagen
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -76,8 +77,34 @@ func (g *Generator) GenerateBytes(schemaJSON []byte) ([]byte, error) {
 	return json.Marshal(result)
 }
 
+// GenerateWithContext generates random JSON data with context support for cancellation
+func (g *Generator) GenerateWithContext(ctx context.Context, schemaJSON []byte) (interface{}, error) {
+	schema, err := ParseSchema(schemaJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := schema.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid schema: %w", err)
+	}
+
+	return g.generateWithContext(ctx, schema, 0)
+}
+
 // generate is the core recursive generation function
 func (g *Generator) generate(schema *Schema, depth int) (interface{}, error) {
+	return g.generateWithContext(context.Background(), schema, depth)
+}
+
+// generateWithContext is the core recursive generation function with context support
+func (g *Generator) generateWithContext(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
+	// Check for context cancellation
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("generation cancelled: %w", ctx.Err())
+	default:
+	}
+
 	// Check depth limit
 	if depth >= g.MaxDepth {
 		return nil, fmt.Errorf("maximum recursion depth (%d) exceeded", g.MaxDepth)

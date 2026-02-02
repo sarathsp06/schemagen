@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
-	"github.com/sarathsadasivanpillai/schemagen"
+	"github.com/sarathsp06/schemagen"
 )
 
 func main() {
@@ -28,6 +30,12 @@ func main() {
 
 	// Example 6: Deterministic Generation
 	example6()
+
+	// Example 7: Context-aware Generation
+	example7()
+
+	// Example 8: Enhanced Validation Errors
+	example8()
 }
 
 func example1() {
@@ -213,6 +221,66 @@ func example6() {
 	printJSON(result2)
 
 	fmt.Println("\nBoth outputs are identical! ✓")
+}
+
+func example7() {
+	fmt.Println("\n7. Context-aware Generation (with timeout):")
+	schema := `{
+		"type": "object",
+		"properties": {
+			"id": {"type": "integer", "minimum": 1, "maximum": 1000},
+			"name": {"type": "string", "minLength": 5, "maxLength": 10}
+		},
+		"required": ["id", "name"]
+	}`
+
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gen := schemagen.NewGenerator().SetSeed(12345)
+	result, err := gen.GenerateWithContext(ctx, []byte(schema))
+	if err != nil {
+		log.Printf("Error: %v", err)
+		return
+	}
+
+	formatted, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(formatted))
+}
+
+func example8() {
+	fmt.Println("\n8. Enhanced Validation Errors:")
+	
+	// Example with conflicting constraints
+	invalidSchema := `{
+		"type": "object",
+		"properties": {
+			"invalidString": {
+				"type": "string",
+				"minLength": 10,
+				"maxLength": 5
+			},
+			"invalidNumber": {
+				"type": "number",
+				"minimum": 100,
+				"maximum": 50
+			}
+		}
+	}`
+
+	schema, err := schemagen.ParseSchema([]byte(invalidSchema))
+	if err != nil {
+		log.Printf("Parse error: %v", err)
+		return
+	}
+
+	// Get detailed validation errors
+	errors := schema.ValidateWithDetails("")
+	fmt.Printf("Found %d validation errors:\n", len(errors))
+	for _, err := range errors {
+		fmt.Printf("  - %s\n", err.Error())
+	}
 }
 
 func printJSON(data []byte) {
