@@ -7,6 +7,6 @@ replace github.com/sarathsp06/schemagen => ../
 require github.com/sarathsp06/schemagen v0.0.0-00010101000000-000000000000
 
 require (
-	github.com/brianvoe/gofakeit/v7 v7.12.0 // indirect
+	github.com/brianvoe/gofakeit/v7 v7.14.0 // indirect
 	github.com/lucasjones/reggen v0.0.0-20200904144131-37ba4fa293bb // indirect
 )

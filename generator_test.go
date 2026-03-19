@@ -1,9 +1,11 @@
 package schemagen
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGenerateString(t *testing.T) {
@@ -393,8 +395,36 @@ func TestGenerateAnyOf(t *testing.T) {
 func TestGenerateAllOf(t *testing.T) {
 	schema := `{
 		"allOf": [
-			{"type": "object", "properties": {"name": {"type": "string"}}},
-			{"type": "object", "properties": {"age": {"type": "integer"}}}
+			{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+			{"type": "object", "properties": {"age": {"type": "integer"}}, "required": ["age"]}
+		]
+	}`
+
+	gen := NewGenerator().SetSeed(12345).SetGenerateAllFields(true)
+	result, err := gen.Generate([]byte(schema))
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	obj, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected object, got %T", result)
+	}
+
+	// After allOf merging, both properties should be present
+	if _, exists := obj["name"]; !exists {
+		t.Error("Expected merged 'name' property from first allOf schema")
+	}
+	if _, exists := obj["age"]; !exists {
+		t.Error("Expected merged 'age' property from second allOf schema")
+	}
+}
+
+func TestGenerateAllOfMergesRequired(t *testing.T) {
+	schema := `{
+		"allOf": [
+			{"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+			{"type": "object", "properties": {"age": {"type": "integer"}}, "required": ["age"]}
 		]
 	}`
 
@@ -404,9 +434,40 @@ func TestGenerateAllOf(t *testing.T) {
 		t.Fatalf("Generate() error = %v", err)
 	}
 
-	_, ok := result.(map[string]interface{})
+	obj, ok := result.(map[string]interface{})
 	if !ok {
 		t.Fatalf("Expected object, got %T", result)
+	}
+
+	// Both required fields should be present even without GenerateAllFields
+	if _, exists := obj["name"]; !exists {
+		t.Error("Required field 'name' missing after allOf merge")
+	}
+	if _, exists := obj["age"]; !exists {
+		t.Error("Required field 'age' missing after allOf merge")
+	}
+}
+
+func TestGenerateAllOfNonObject(t *testing.T) {
+	schema := `{
+		"allOf": [
+			{"type": "string", "minLength": 5}
+		]
+	}`
+
+	gen := NewGenerator().SetSeed(12345)
+	result, err := gen.Generate([]byte(schema))
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("Expected string, got %T", result)
+	}
+
+	if len(str) < 5 {
+		t.Errorf("Expected string length >= 5, got %d", len(str))
 	}
 }
 
@@ -688,23 +749,31 @@ func TestGenerateStringPatternError(t *testing.T) {
 	}
 }
 
-// Test exclusive minimum and maximum
+// Test exclusive minimum and maximum with proper assertions
 func TestGenerateNumberExclusiveBounds(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema string
+		minVal float64
+		maxVal float64
 	}{
 		{
 			name:   "exclusive minimum",
 			schema: `{"type": "integer", "exclusiveMinimum": 10, "maximum": 20}`,
+			minVal: 11, // exclusiveMinimum: 10 means > 10, so integer min is 11
+			maxVal: 20,
 		},
 		{
 			name:   "exclusive maximum",
 			schema: `{"type": "integer", "minimum": 10, "exclusiveMaximum": 20}`,
+			minVal: 10,
+			maxVal: 19, // exclusiveMaximum: 20 means < 20, so integer max is 19
 		},
 		{
 			name:   "both exclusive",
 			schema: `{"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}`,
+			minVal: 0, // for floats, exclusive bounds are used directly
+			maxVal: 1,
 		},
 	}
 
@@ -726,12 +795,43 @@ func TestGenerateNumberExclusiveBounds(t *testing.T) {
 				t.Fatalf("Expected number type, got %T", result)
 			}
 
-			// Verify result is within bounds
-			if numVal < 0 || numVal > 100 {
-				t.Logf("Generated value: %f", numVal)
+			if numVal < tt.minVal {
+				t.Errorf("Value %f is less than expected minimum %f", numVal, tt.minVal)
+			}
+			if numVal > tt.maxVal {
+				t.Errorf("Value %f is greater than expected maximum %f", numVal, tt.maxVal)
 			}
 		})
 	}
+}
+
+// Test exclusive bounds with non-integer boundaries
+func TestGenerateNumberExclusiveBoundsNonInteger(t *testing.T) {
+	t.Run("exclusiveMinimum with fractional value", func(t *testing.T) {
+		schema := `{"type": "integer", "exclusiveMinimum": 10.5, "maximum": 20}`
+		gen := NewGenerator().SetSeed(42)
+		result, err := gen.Generate([]byte(schema))
+		if err != nil {
+			t.Fatalf("Generate() error = %v", err)
+		}
+		val := result.(int64)
+		if val < 11 {
+			t.Errorf("Expected value >= 11 (exclusiveMinimum: 10.5), got %d", val)
+		}
+	})
+
+	t.Run("exclusiveMaximum with fractional value", func(t *testing.T) {
+		schema := `{"type": "integer", "exclusiveMaximum": 20.5, "minimum": 10}`
+		gen := NewGenerator().SetSeed(42)
+		result, err := gen.Generate([]byte(schema))
+		if err != nil {
+			t.Fatalf("Generate() error = %v", err)
+		}
+		val := result.(int64)
+		if val > 20 {
+			t.Errorf("Expected value <= 20 (exclusiveMaximum: 20.5), got %d", val)
+		}
+	})
 }
 
 // Test number with conflicting exclusive bounds
@@ -870,8 +970,6 @@ func TestGenerateArrayInvalidItems(t *testing.T) {
 	}
 }
 
-// Test anyOf with empty array
-// Test allOf with empty array
 // Test schema with no type inference (object)
 func TestGenerateNoTypeWithProperties(t *testing.T) {
 	schema := `{
@@ -1103,15 +1201,28 @@ func TestGenerateNumberMultipleOfBounds(t *testing.T) {
 	if val < 10 || val > 15 {
 		t.Errorf("Expected value between 10 and 15, got %d", val)
 	}
+
+	if val%7 != 0 {
+		t.Errorf("Expected value to be a multiple of 7, got %d", val)
+	}
+}
+
+// Test multipleOf with no valid value in range
+func TestGenerateNumberMultipleOfNoValidValue(t *testing.T) {
+	// Range [10, 13] with multipleOf 7: only multiple of 7 is 7 or 14, neither in range
+	schema := `{"type": "integer", "minimum": 10, "maximum": 13, "multipleOf": 7}`
+
+	gen := NewGenerator().SetSeed(12345)
+	_, err := gen.Generate([]byte(schema))
+	if err == nil {
+		t.Error("Expected error when no multiple of 7 exists in range [10, 13]")
+	}
 }
 
 // Test array items parsing error
 func TestGenerateArrayItemsParseError(t *testing.T) {
-	// Create invalid items that will fail to parse
 	gen := NewGenerator().SetSeed(42)
 
-	// This would require manipulating internal state,
-	// so we test with a complex invalid schema structure
 	schema := `{
 		"type": "array",
 		"items": {"type": "object", "properties": {"x": {"type": "invalid"}}}
@@ -1140,4 +1251,424 @@ func TestGenerateObjectFieldError(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for unsupported field type")
 	}
+}
+
+// Test ValidationErrors implements error and contains all errors
+func TestValidationErrorsMultiple(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {
+			"bad_string": {
+				"type": "string",
+				"minLength": 10,
+				"maxLength": 5
+			},
+			"bad_number": {
+				"type": "number",
+				"minimum": 100,
+				"maximum": 50
+			}
+		}
+	}`
+
+	s, err := ParseSchema([]byte(schema))
+	if err != nil {
+		t.Fatalf("ParseSchema error: %v", err)
+	}
+
+	validationErr := s.Validate()
+	if validationErr == nil {
+		t.Fatal("Expected validation error")
+	}
+
+	ve, ok := validationErr.(ValidationErrors)
+	if !ok {
+		t.Fatalf("Expected ValidationErrors type, got %T", validationErr)
+	}
+
+	if len(ve) != 2 {
+		t.Errorf("Expected 2 validation errors, got %d", len(ve))
+	}
+
+	errStr := ve.Error()
+	if !strings.Contains(errStr, "2 validation errors") {
+		t.Errorf("Expected multi-error message, got: %s", errStr)
+	}
+}
+
+// Test that required fields not in properties are caught by validation
+func TestValidateRequiredNotInProperties(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"}
+		},
+		"required": ["name", "missing_field"]
+	}`
+
+	gen := NewGenerator()
+	_, err := gen.Generate([]byte(schema))
+	if err == nil {
+		t.Error("Expected error for required field not defined in properties")
+	}
+
+	if !strings.Contains(err.Error(), "missing_field") {
+		t.Errorf("Expected error to mention 'missing_field', got: %s", err.Error())
+	}
+}
+
+// Test negative constraint values
+func TestValidateNegativeConstraints(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+	}{
+		{
+			name:   "negative minLength",
+			schema: `{"type": "string", "minLength": -1}`,
+		},
+		{
+			name:   "negative maxLength",
+			schema: `{"type": "string", "maxLength": -1}`,
+		},
+		{
+			name:   "negative minItems",
+			schema: `{"type": "array", "minItems": -1}`,
+		},
+		{
+			name:   "negative maxItems",
+			schema: `{"type": "array", "maxItems": -1}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gen := NewGenerator()
+			_, err := gen.Generate([]byte(tt.schema))
+			if err == nil {
+				t.Error("Expected error for negative constraint value")
+			}
+		})
+	}
+}
+
+// Test zero multipleOf validation
+func TestValidateZeroMultipleOf(t *testing.T) {
+	schema := `{"type": "number", "multipleOf": 0}`
+
+	gen := NewGenerator()
+	_, err := gen.Generate([]byte(schema))
+	if err == nil {
+		t.Error("Expected error for zero multipleOf")
+	}
+}
+
+// Test uniqueItems support
+func TestGenerateArrayUniqueItems(t *testing.T) {
+	schema := `{
+		"type": "array",
+		"items": {"type": "integer", "minimum": 1, "maximum": 100},
+		"minItems": 5,
+		"maxItems": 5,
+		"uniqueItems": true
+	}`
+
+	gen := NewGenerator().SetSeed(42)
+	result, err := gen.Generate([]byte(schema))
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	arr, ok := result.([]interface{})
+	if !ok {
+		t.Fatalf("Expected array, got %T", result)
+	}
+
+	if len(arr) != 5 {
+		t.Fatalf("Expected 5 items, got %d", len(arr))
+	}
+
+	// Check uniqueness
+	seen := make(map[int64]bool)
+	for _, item := range arr {
+		val, ok := item.(int64)
+		if !ok {
+			t.Fatalf("Expected int64, got %T", item)
+		}
+		if seen[val] {
+			t.Errorf("Duplicate value found: %d", val)
+		}
+		seen[val] = true
+	}
+}
+
+// Test GenerateFromSchema with pre-parsed schema
+func TestGenerateFromSchema(t *testing.T) {
+	schemaJSON := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"},
+			"age": {"type": "integer", "minimum": 0, "maximum": 120}
+		},
+		"required": ["name"]
+	}`
+
+	schema, err := ParseSchema([]byte(schemaJSON))
+	if err != nil {
+		t.Fatalf("ParseSchema error: %v", err)
+	}
+
+	gen := NewGenerator().SetSeed(42)
+	result, err := gen.GenerateFromSchema(schema)
+	if err != nil {
+		t.Fatalf("GenerateFromSchema() error = %v", err)
+	}
+
+	obj, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected object, got %T", result)
+	}
+
+	if _, exists := obj["name"]; !exists {
+		t.Error("Required field 'name' is missing")
+	}
+}
+
+// Test GenerateFromSchema with invalid schema
+func TestGenerateFromSchemaInvalid(t *testing.T) {
+	schema := &Schema{
+		Type: StringOrArray{Single: "string", IsArray: false},
+	}
+	minLen := 10
+	maxLen := 5
+	schema.MinLength = &minLen
+	schema.MaxLength = &maxLen
+
+	gen := NewGenerator()
+	_, err := gen.GenerateFromSchema(schema)
+	if err == nil {
+		t.Error("Expected error for invalid schema")
+	}
+}
+
+// Test context cancellation is propagated through recursive generation
+func TestGenerateWithContextCancellation(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {
+			"data": {
+				"type": "array",
+				"items": {"type": "string"},
+				"minItems": 100
+			}
+		},
+		"required": ["data"]
+	}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	gen := NewGenerator().SetSeed(42)
+	_, err := gen.GenerateWithContext(ctx, []byte(schema))
+	if err == nil {
+		t.Error("Expected error for cancelled context")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("Expected cancellation error, got: %v", err)
+	}
+}
+
+// Test context timeout propagation
+func TestGenerateWithContextTimeout(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"}
+		},
+		"required": ["name"]
+	}`
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gen := NewGenerator().SetSeed(42)
+	result, err := gen.GenerateWithContext(ctx, []byte(schema))
+	if err != nil {
+		t.Fatalf("GenerateWithContext() error = %v", err)
+	}
+
+	obj, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected object, got %T", result)
+	}
+
+	if _, exists := obj["name"]; !exists {
+		t.Error("Required field 'name' is missing")
+	}
+}
+
+// Test not keyword is parsed (even if not used for generation)
+func TestSchemaNotKeywordParsed(t *testing.T) {
+	schemaJSON := `{
+		"type": "string",
+		"not": {"type": "null"}
+	}`
+
+	schema, err := ParseSchema([]byte(schemaJSON))
+	if err != nil {
+		t.Fatalf("ParseSchema error: %v", err)
+	}
+
+	if schema.Not == nil {
+		t.Error("Expected 'not' keyword to be parsed")
+	}
+}
+
+// Test deterministic object generation (sorted keys)
+func TestDeterministicObjectGeneration(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {
+			"zebra": {"type": "string"},
+			"apple": {"type": "string"},
+			"mango": {"type": "string"}
+		},
+		"required": ["zebra", "apple", "mango"]
+	}`
+
+	seed := int64(42)
+
+	// Generate multiple times with same seed; results must be identical
+	for i := 0; i < 5; i++ {
+		gen1 := NewGenerator().SetSeed(seed)
+		result1, _ := gen1.GenerateBytes([]byte(schema))
+
+		gen2 := NewGenerator().SetSeed(seed)
+		result2, _ := gen2.GenerateBytes([]byte(schema))
+
+		if string(result1) != string(result2) {
+			t.Errorf("Iteration %d: Results with same seed should be identical.\nGot:\n%s\n%s", i, result1, result2)
+		}
+	}
+}
+
+// Test randomString produces readable strings with spaces for longer lengths
+func TestRandomStringHasSpaces(t *testing.T) {
+	gen := NewGenerator().SetSeed(42)
+
+	// Generate a string long enough to require multiple words
+	result := gen.randomString(30)
+
+	if len(result) != 30 {
+		t.Errorf("Expected length 30, got %d", len(result))
+	}
+
+	// Longer strings should have spaces from word concatenation
+	if !strings.Contains(result, " ") {
+		t.Errorf("Expected string to contain spaces for readability, got: %q", result)
+	}
+}
+
+// Test parseAdditionalProperties helper
+func TestParseAdditionalProperties(t *testing.T) {
+	t.Run("not set", func(t *testing.T) {
+		s := &Schema{}
+		schema, allowed, err := s.parseAdditionalProperties()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if schema != nil || allowed {
+			t.Error("Expected nil schema and false when not set")
+		}
+	})
+
+	t.Run("boolean true", func(t *testing.T) {
+		s := &Schema{AdditionalProperties: json.RawMessage(`true`)}
+		schema, allowed, err := s.parseAdditionalProperties()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if schema != nil {
+			t.Error("Expected nil schema for boolean")
+		}
+		if !allowed {
+			t.Error("Expected allowed=true")
+		}
+	})
+
+	t.Run("boolean false", func(t *testing.T) {
+		s := &Schema{AdditionalProperties: json.RawMessage(`false`)}
+		schema, allowed, err := s.parseAdditionalProperties()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if schema != nil {
+			t.Error("Expected nil schema for boolean")
+		}
+		if allowed {
+			t.Error("Expected allowed=false")
+		}
+	})
+
+	t.Run("schema", func(t *testing.T) {
+		s := &Schema{AdditionalProperties: json.RawMessage(`{"type": "integer"}`)}
+		schema, allowed, err := s.parseAdditionalProperties()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if schema == nil {
+			t.Error("Expected non-nil schema")
+		}
+		if !allowed {
+			t.Error("Expected allowed=true for schema")
+		}
+		if schema.Type.Single != "integer" {
+			t.Errorf("Expected integer type, got %s", schema.Type.Single)
+		}
+	})
+}
+
+// Test parseItems helper
+func TestParseItems(t *testing.T) {
+	t.Run("not set", func(t *testing.T) {
+		s := &Schema{}
+		single, tuple, err := s.parseItems()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if single != nil || tuple != nil {
+			t.Error("Expected nil for unset items")
+		}
+	})
+
+	t.Run("single schema", func(t *testing.T) {
+		s := &Schema{Items: json.RawMessage(`{"type": "string"}`)}
+		single, tuple, err := s.parseItems()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if single == nil {
+			t.Fatal("Expected non-nil single schema")
+		}
+		if tuple != nil {
+			t.Error("Expected nil tuple for single schema")
+		}
+		if single.Type.Single != "string" {
+			t.Errorf("Expected string type, got %s", single.Type.Single)
+		}
+	})
+
+	t.Run("tuple schema", func(t *testing.T) {
+		s := &Schema{Items: json.RawMessage(`[{"type": "string"}, {"type": "integer"}]`)}
+		single, tuple, err := s.parseItems()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if single != nil {
+			t.Error("Expected nil single for tuple")
+		}
+		if len(tuple) != 2 {
+			t.Fatalf("Expected 2 tuple schemas, got %d", len(tuple))
+		}
+	})
 }

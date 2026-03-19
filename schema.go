@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // ValidationError represents a schema validation error with context
 type ValidationError struct {
-	Path    string `json:"path"`
-	Message string `json:"message"`
+	Path    string      `json:"path"`
+	Message string      `json:"message"`
 	Value   interface{} `json:"value,omitempty"`
 }
 
@@ -18,6 +19,23 @@ func (ve ValidationError) Error() string {
 		return fmt.Sprintf("validation error at %s: %s", ve.Path, ve.Message)
 	}
 	return ve.Message
+}
+
+// ValidationErrors is a collection of validation errors that implements the error interface
+type ValidationErrors []ValidationError
+
+func (ve ValidationErrors) Error() string {
+	if len(ve) == 0 {
+		return ""
+	}
+	if len(ve) == 1 {
+		return ve[0].Error()
+	}
+	msgs := make([]string, len(ve))
+	for i, e := range ve {
+		msgs[i] = e.Error()
+	}
+	return fmt.Sprintf("%d validation errors: [%s]", len(ve), strings.Join(msgs, "; "))
 }
 
 // Schema represents a JSON Schema with support for Draft 2020-12 and Draft-07
@@ -46,22 +64,71 @@ type Schema struct {
 	// Object
 	Properties           map[string]*Schema `json:"properties,omitempty"`
 	Required             []string           `json:"required,omitempty"`
-	AdditionalProperties interface{}        `json:"additionalProperties,omitempty"` // bool or Schema
+	AdditionalProperties json.RawMessage    `json:"additionalProperties,omitempty"`
 
 	// Array
-	Items    interface{} `json:"items,omitempty"` // Schema or array of Schemas
-	MinItems *int        `json:"minItems,omitempty"`
-	MaxItems *int        `json:"maxItems,omitempty"`
+	Items       json.RawMessage `json:"items,omitempty"`
+	MinItems    *int            `json:"minItems,omitempty"`
+	MaxItems    *int            `json:"maxItems,omitempty"`
+	UniqueItems *bool           `json:"uniqueItems,omitempty"`
 
 	// Composition
 	OneOf []Schema `json:"oneOf,omitempty"`
 	AnyOf []Schema `json:"anyOf,omitempty"`
 	AllOf []Schema `json:"allOf,omitempty"`
+	Not   *Schema  `json:"not,omitempty"`
 
 	// References (for future support)
 	Ref         string             `json:"$ref,omitempty"`
 	Definitions map[string]*Schema `json:"definitions,omitempty"`
 	Defs        map[string]*Schema `json:"$defs,omitempty"` // Draft 2020-12
+}
+
+// parseAdditionalProperties parses the AdditionalProperties field.
+// Returns (nil, false) if not set, (nil, true/false) if boolean, (*Schema, true) if schema.
+func (s *Schema) parseAdditionalProperties() (*Schema, bool, error) {
+	if len(s.AdditionalProperties) == 0 {
+		return nil, false, nil
+	}
+
+	// Try as boolean first
+	var boolVal bool
+	if err := json.Unmarshal(s.AdditionalProperties, &boolVal); err == nil {
+		return nil, boolVal, nil
+	}
+
+	// Try as schema
+	var schema Schema
+	if err := json.Unmarshal(s.AdditionalProperties, &schema); err != nil {
+		return nil, false, fmt.Errorf("additionalProperties must be a boolean or schema: %w", err)
+	}
+	return &schema, true, nil
+}
+
+// parseItems parses the Items field.
+// Returns a single *Schema for uniform items, or []*Schema for tuple validation.
+func (s *Schema) parseItems() (single *Schema, tuple []*Schema, err error) {
+	if len(s.Items) == 0 {
+		return nil, nil, nil
+	}
+
+	// Try as a single schema first
+	var schema Schema
+	if err := json.Unmarshal(s.Items, &schema); err == nil {
+		return &schema, nil, nil
+	}
+
+	// Try as array of schemas (tuple validation)
+	var schemas []Schema
+	if err := json.Unmarshal(s.Items, &schemas); err != nil {
+		return nil, nil, fmt.Errorf("items must be a schema or array of schemas: %w", err)
+	}
+
+	ptrs := make([]*Schema, len(schemas))
+	for i := range schemas {
+		ptrs[i] = &schemas[i]
+	}
+	return nil, ptrs, nil
 }
 
 // StringOrArray handles the polymorphic nature of the "type" field
@@ -137,12 +204,13 @@ func ParseSchema(schemaJSON []byte) (*Schema, error) {
 	return &schema, nil
 }
 
-// Validate performs comprehensive validation on the schema constraints
+// Validate performs comprehensive validation on the schema constraints.
+// Returns a ValidationErrors (which implements error) containing all errors found,
+// or nil if the schema is valid.
 func (s *Schema) Validate() error {
 	errors := s.ValidateWithDetails("")
 	if len(errors) > 0 {
-		// Return first error for backward compatibility
-		return errors[0]
+		return ValidationErrors(errors)
 	}
 	return nil
 }
@@ -187,6 +255,52 @@ func (s *Schema) ValidateWithDetails(basePath string) []ValidationError {
 				Path:    basePath,
 				Message: fmt.Sprintf("minItems (%d) cannot be greater than maxItems (%d)", *s.MinItems, *s.MaxItems),
 			})
+		}
+	}
+
+	// Validate non-negative constraint values
+	if s.MinLength != nil && *s.MinLength < 0 {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("minLength (%d) must be non-negative", *s.MinLength),
+		})
+	}
+	if s.MaxLength != nil && *s.MaxLength < 0 {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("maxLength (%d) must be non-negative", *s.MaxLength),
+		})
+	}
+	if s.MinItems != nil && *s.MinItems < 0 {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("minItems (%d) must be non-negative", *s.MinItems),
+		})
+	}
+	if s.MaxItems != nil && *s.MaxItems < 0 {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("maxItems (%d) must be non-negative", *s.MaxItems),
+		})
+	}
+
+	// Validate multipleOf is positive
+	if s.MultipleOf != nil && *s.MultipleOf <= 0 {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("multipleOf (%f) must be greater than zero", *s.MultipleOf),
+		})
+	}
+
+	// Validate required fields exist in properties (if properties are defined)
+	if s.Properties != nil && len(s.Required) > 0 {
+		for _, reqField := range s.Required {
+			if _, exists := s.Properties[reqField]; !exists {
+				errors = append(errors, ValidationError{
+					Path:    basePath,
+					Message: fmt.Sprintf("required field %q is not defined in properties", reqField),
+				})
+			}
 		}
 	}
 

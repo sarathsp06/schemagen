@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/brianvoe/gofakeit/v7"
 	"github.com/lucasjones/reggen"
 )
 
-// Generator configuration for generating random JSON data
+// Generator configuration for generating random JSON data.
+//
+// A Generator is NOT safe for concurrent use by multiple goroutines.
+// Each goroutine should create its own Generator instance.
 type Generator struct {
 	MaxDepth          int
 	Seed              int64
@@ -64,7 +68,16 @@ func (g *Generator) Generate(schemaJSON []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid schema: %w", err)
 	}
 
-	return g.generate(schema, 0)
+	return g.generateWithContext(context.Background(), schema, 0)
+}
+
+// GenerateFromSchema generates random JSON data from a pre-parsed Schema
+func (g *Generator) GenerateFromSchema(schema *Schema) (interface{}, error) {
+	if err := schema.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid schema: %w", err)
+	}
+
+	return g.generateWithContext(context.Background(), schema, 0)
 }
 
 // GenerateBytes generates random JSON data and returns it as bytes
@@ -89,11 +102,6 @@ func (g *Generator) GenerateWithContext(ctx context.Context, schemaJSON []byte) 
 	}
 
 	return g.generateWithContext(ctx, schema, 0)
-}
-
-// generate is the core recursive generation function
-func (g *Generator) generate(schema *Schema, depth int) (interface{}, error) {
-	return g.generateWithContext(context.Background(), schema, depth)
 }
 
 // generateWithContext is the core recursive generation function with context support
@@ -122,29 +130,29 @@ func (g *Generator) generateWithContext(ctx context.Context, schema *Schema, dep
 
 	// Handle composition keywords
 	if len(schema.OneOf) > 0 {
-		return g.handleOneOf(schema, depth)
+		return g.handleOneOf(ctx, schema, depth)
 	}
 
 	if len(schema.AnyOf) > 0 {
-		return g.handleAnyOf(schema, depth)
+		return g.handleAnyOf(ctx, schema, depth)
 	}
 
 	if len(schema.AllOf) > 0 {
-		return g.handleAllOf(schema, depth)
+		return g.handleAllOf(ctx, schema, depth)
 	}
 
 	// Handle type-based generation
 	if !schema.Type.IsEmpty() {
-		return g.generateByType(schema, depth)
+		return g.generateByType(ctx, schema, depth)
 	}
 
 	// If no type specified, try to infer from other properties
 	if schema.Properties != nil {
-		return g.generateObject(schema, depth)
+		return g.generateObject(ctx, schema, depth)
 	}
 
-	if schema.Items != nil {
-		return g.generateArray(schema, depth)
+	if len(schema.Items) > 0 {
+		return g.generateArray(ctx, schema, depth)
 	}
 
 	// Default to generating an object if we have no other info
@@ -152,7 +160,7 @@ func (g *Generator) generateWithContext(ctx context.Context, schema *Schema, dep
 }
 
 // generateByType generates data based on the type field
-func (g *Generator) generateByType(schema *Schema, depth int) (interface{}, error) {
+func (g *Generator) generateByType(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	types := schema.Type.GetTypes()
 
 	// If multiple types, randomly choose one
@@ -160,7 +168,7 @@ func (g *Generator) generateByType(schema *Schema, depth int) (interface{}, erro
 		chosenType := types[g.rand.Intn(len(types))]
 		modifiedSchema := *schema
 		modifiedSchema.Type = StringOrArray{Single: chosenType, IsArray: false}
-		return g.generateByType(&modifiedSchema, depth)
+		return g.generateByType(ctx, &modifiedSchema, depth)
 	}
 
 	if len(types) == 0 {
@@ -179,9 +187,9 @@ func (g *Generator) generateByType(schema *Schema, depth int) (interface{}, erro
 	case "boolean":
 		return g.generateBoolean()
 	case "object":
-		return g.generateObject(schema, depth)
+		return g.generateObject(ctx, schema, depth)
 	case "array":
-		return g.generateArray(schema, depth)
+		return g.generateArray(ctx, schema, depth)
 	case "null":
 		return nil, nil
 	default:
@@ -270,25 +278,27 @@ func (g *Generator) generateNumber(schema *Schema, isInteger bool) (interface{},
 	if schema.Minimum != nil {
 		min = *schema.Minimum
 	} else if schema.ExclusiveMinimum != nil {
-		min = *schema.ExclusiveMinimum
 		if isInteger {
-			min = math.Ceil(min)
+			// exclusiveMinimum: 10 means > 10, so smallest integer is 11
+			// exclusiveMinimum: 10.5 means > 10.5, so smallest integer is 11
+			min = math.Floor(*schema.ExclusiveMinimum) + 1
+		} else {
+			min = *schema.ExclusiveMinimum
 		}
 	} else {
-		if isInteger {
-			min = 0
-		} else {
-			min = 0.0
-		}
+		min = 0
 	}
 
 	// Determine maximum
 	if schema.Maximum != nil {
 		max = *schema.Maximum
 	} else if schema.ExclusiveMaximum != nil {
-		max = *schema.ExclusiveMaximum
 		if isInteger {
-			max = math.Floor(max) - 1
+			// exclusiveMaximum: 20 means < 20, so largest integer is 19
+			// exclusiveMaximum: 20.5 means < 20.5, so largest integer is 20
+			max = math.Ceil(*schema.ExclusiveMaximum) - 1
+		} else {
+			max = *schema.ExclusiveMaximum
 		}
 	} else {
 		if isInteger {
@@ -323,12 +333,17 @@ func (g *Generator) generateNumber(schema *Schema, isInteger bool) (interface{},
 		multiple := *schema.MultipleOf
 		result = math.Round(result/multiple) * multiple
 
-		// Ensure result is still within bounds
-		if result < min {
+		// Ensure result is still within bounds using a loop
+		for result < min {
 			result += multiple
 		}
-		if result > max {
+		for result > max {
 			result -= multiple
+		}
+
+		// If no valid multiple exists in the range, return an error
+		if result < min || result > max {
+			return nil, fmt.Errorf("no multiple of %f exists in range [%f, %f]", multiple, min, max)
 		}
 	}
 
@@ -344,7 +359,7 @@ func (g *Generator) generateBoolean() (bool, error) {
 }
 
 // generateObject generates a random object conforming to schema
-func (g *Generator) generateObject(schema *Schema, depth int) (interface{}, error) {
+func (g *Generator) generateObject(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	result := make(map[string]interface{})
 
 	if schema.Properties == nil {
@@ -357,11 +372,19 @@ func (g *Generator) generateObject(schema *Schema, depth int) (interface{}, erro
 		requiredMap[fieldName] = true
 	}
 
-	// Generate properties
-	for fieldName, fieldSchema := range schema.Properties {
+	// Sort property names for deterministic iteration order
+	propNames := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		propNames = append(propNames, name)
+	}
+	sort.Strings(propNames)
+
+	// Generate properties in deterministic order
+	for _, fieldName := range propNames {
+		fieldSchema := schema.Properties[fieldName]
 		// Generate field if it's required or if we're generating all fields
 		if requiredMap[fieldName] || g.GenerateAllFields {
-			value, err := g.generate(fieldSchema, depth+1)
+			value, err := g.generateWithContext(ctx, fieldSchema, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate field %s: %w", fieldName, err)
 			}
@@ -370,29 +393,25 @@ func (g *Generator) generateObject(schema *Schema, depth int) (interface{}, erro
 	}
 
 	// Handle additionalProperties if configured
-	if schema.AdditionalProperties != nil && g.GenerateAllFields {
-		switch ap := schema.AdditionalProperties.(type) {
-		case bool:
-			if ap {
-				// Generate a few random additional properties
-				numExtra := g.rand.Intn(3)
-				for i := 0; i < numExtra; i++ {
-					key := g.faker.Word()
-					result[key] = g.faker.Word()
-				}
-			}
-		case map[string]interface{}:
-			// AdditionalProperties is a schema
-			apBytes, _ := json.Marshal(ap)
-			apSchema, err := ParseSchema(apBytes)
-			if err == nil {
-				numExtra := g.rand.Intn(3)
-				for i := 0; i < numExtra; i++ {
-					key := g.faker.Word()
-					value, err := g.generate(apSchema, depth+1)
+	if len(schema.AdditionalProperties) > 0 && g.GenerateAllFields {
+		apSchema, allowed, err := schema.parseAdditionalProperties()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse additionalProperties: %w", err)
+		}
+
+		if allowed {
+			numExtra := g.rand.Intn(3)
+			for i := 0; i < numExtra; i++ {
+				key := g.faker.Word()
+				if apSchema != nil {
+					// AdditionalProperties is a schema
+					value, err := g.generateWithContext(ctx, apSchema, depth+1)
 					if err == nil {
 						result[key] = value
 					}
+				} else {
+					// AdditionalProperties is true (boolean)
+					result[key] = g.faker.Word()
 				}
 			}
 		}
@@ -402,7 +421,7 @@ func (g *Generator) generateObject(schema *Schema, depth int) (interface{}, erro
 }
 
 // generateArray generates a random array conforming to schema
-func (g *Generator) generateArray(schema *Schema, depth int) (interface{}, error) {
+func (g *Generator) generateArray(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	minItems := 0
 	maxItems := 5 // default
 
@@ -423,91 +442,164 @@ func (g *Generator) generateArray(schema *Schema, depth int) (interface{}, error
 		length = minItems + g.rand.Intn(maxItems-minItems+1)
 	}
 
-	result := make([]interface{}, length)
+	result := make([]interface{}, 0, length)
 
-	// Handle items schema
-	if schema.Items == nil {
+	// Parse items schema
+	single, tuple, err := schema.parseItems()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse items schema: %w", err)
+	}
+
+	isUnique := schema.UniqueItems != nil && *schema.UniqueItems
+	seen := make(map[string]bool) // track unique values by JSON representation
+	maxAttempts := length * 10    // prevent infinite loops for uniqueItems
+
+	if single == nil && tuple == nil {
 		// No items schema, generate arbitrary values
 		for i := 0; i < length; i++ {
-			result[i] = g.faker.Word()
+			val := g.faker.Word()
+			if isUnique {
+				for attempts := 0; seen[val] && attempts < maxAttempts; attempts++ {
+					val = g.faker.Word()
+				}
+				seen[val] = true
+			}
+			result = append(result, val)
 		}
 		return result, nil
 	}
 
-	// Items can be a single schema or an array of schemas
-	switch items := schema.Items.(type) {
-	case map[string]interface{}:
+	if single != nil {
 		// Single schema for all items
-		itemsBytes, _ := json.Marshal(items)
-		itemSchema, err := ParseSchema(itemsBytes)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse items schema: %w", err)
-		}
-
 		for i := 0; i < length; i++ {
-			value, err := g.generate(itemSchema, depth+1)
+			value, err := g.generateWithContext(ctx, single, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate array item %d: %w", i, err)
 			}
-			result[i] = value
+
+			if isUnique {
+				key := jsonKey(value)
+				for attempts := 0; seen[key] && attempts < maxAttempts; attempts++ {
+					value, err = g.generateWithContext(ctx, single, depth+1)
+					if err != nil {
+						return nil, fmt.Errorf("failed to generate unique array item %d: %w", i, err)
+					}
+					key = jsonKey(value)
+				}
+				seen[key] = true
+			}
+			result = append(result, value)
 		}
-	case []interface{}:
+	} else if tuple != nil {
 		// Tuple validation - array of schemas
 		for i := 0; i < length; i++ {
-			if i < len(items) {
-				itemBytes, _ := json.Marshal(items[i])
-				itemSchema, err := ParseSchema(itemBytes)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse items schema at index %d: %w", i, err)
-				}
-				value, err := g.generate(itemSchema, depth+1)
+			if i < len(tuple) {
+				value, err := g.generateWithContext(ctx, tuple[i], depth+1)
 				if err != nil {
 					return nil, fmt.Errorf("failed to generate array item %d: %w", i, err)
 				}
-				result[i] = value
+				result = append(result, value)
 			} else {
 				// Beyond tuple length, generate generic values
-				result[i] = g.faker.Word()
+				result = append(result, g.faker.Word())
 			}
 		}
-	default:
-		return nil, fmt.Errorf("unsupported items type: %T", items)
 	}
 
 	return result, nil
 }
 
+// jsonKey returns a string representation of a value for use as a uniqueness key
+func jsonKey(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 // handleOneOf randomly selects one schema from oneOf and generates data
-func (g *Generator) handleOneOf(schema *Schema, depth int) (interface{}, error) {
+func (g *Generator) handleOneOf(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	if len(schema.OneOf) == 0 {
 		return nil, fmt.Errorf("oneOf array is empty")
 	}
 
 	// Pick a random schema
 	chosen := &schema.OneOf[g.rand.Intn(len(schema.OneOf))]
-	return g.generate(chosen, depth)
+	return g.generateWithContext(ctx, chosen, depth)
 }
 
 // handleAnyOf randomly selects one schema from anyOf and generates data
-func (g *Generator) handleAnyOf(schema *Schema, depth int) (interface{}, error) {
+func (g *Generator) handleAnyOf(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	if len(schema.AnyOf) == 0 {
 		return nil, fmt.Errorf("anyOf array is empty")
 	}
 
 	// Pick a random schema
 	chosen := &schema.AnyOf[g.rand.Intn(len(schema.AnyOf))]
-	return g.generate(chosen, depth)
+	return g.generateWithContext(ctx, chosen, depth)
 }
 
-// handleAllOf attempts to merge all schemas (simplified: use first schema for MVP)
-func (g *Generator) handleAllOf(schema *Schema, depth int) (interface{}, error) {
+// handleAllOf merges all schemas and generates data.
+// For object schemas, properties from all sub-schemas are merged.
+// For non-object schemas or mixed types, the first schema is used.
+func (g *Generator) handleAllOf(ctx context.Context, schema *Schema, depth int) (interface{}, error) {
 	if len(schema.AllOf) == 0 {
 		return nil, fmt.Errorf("allOf array is empty")
 	}
 
-	// For MVP: generate from the first schema
-	// A complete implementation would merge all constraints
-	return g.generate(&schema.AllOf[0], depth)
+	// Try to merge object schemas
+	merged := g.mergeAllOfSchemas(schema.AllOf)
+	return g.generateWithContext(ctx, merged, depth)
+}
+
+// mergeAllOfSchemas attempts to merge allOf sub-schemas.
+// It merges properties and required fields from all object-type sub-schemas.
+func (g *Generator) mergeAllOfSchemas(schemas []Schema) *Schema {
+	merged := &Schema{}
+	mergedProperties := make(map[string]*Schema)
+	var mergedRequired []string
+	hasObjectType := false
+
+	for i := range schemas {
+		s := &schemas[i]
+
+		// Collect properties from any schema that has them
+		if s.Properties != nil {
+			hasObjectType = true
+			for name, prop := range s.Properties {
+				mergedProperties[name] = prop
+			}
+		}
+
+		// Collect required fields
+		mergedRequired = append(mergedRequired, s.Required...)
+
+		// If this schema has an explicit object type, mark it
+		if s.Type.Contains("object") {
+			hasObjectType = true
+		}
+	}
+
+	if hasObjectType || len(mergedProperties) > 0 {
+		merged.Type = StringOrArray{Single: "object", IsArray: false}
+		if len(mergedProperties) > 0 {
+			merged.Properties = mergedProperties
+		}
+		if len(mergedRequired) > 0 {
+			// Deduplicate required fields
+			seen := make(map[string]bool)
+			deduped := make([]string, 0, len(mergedRequired))
+			for _, r := range mergedRequired {
+				if !seen[r] {
+					seen[r] = true
+					deduped = append(deduped, r)
+				}
+			}
+			merged.Required = deduped
+		}
+		return merged
+	}
+
+	// If not object schemas, fall back to first schema
+	return &schemas[0]
 }
 
 // randomString generates a random string of specified length using realistic words
@@ -521,12 +613,12 @@ func (g *Generator) randomString(length int) string {
 		return g.faker.LetterN(uint(length))
 	}
 
-	// For longer strings, generate a sentence and truncate if needed
+	// For longer strings, generate words with spaces for readability
 	result := g.faker.Word()
 
-	// If we need more characters, add more words
+	// If we need more characters, add more words with spaces
 	for len(result) < length {
-		result += g.faker.Word()
+		result += " " + g.faker.Word()
 	}
 
 	// Truncate to exact length if needed
