@@ -1,5 +1,10 @@
 # SchemaGen - JSON Schema Generator for Go
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/sarathsp06/schemagen)](https://goreportcard.com/report/github.com/sarathsp06/schemagen)
+[![GoDoc](https://pkg.go.dev/badge/github.com/sarathsp06/schemagen.svg)](https://pkg.go.dev/github.com/sarathsp06/schemagen)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/sarathsp06/schemagen)](https://github.com/sarathsp06/schemagen/blob/main/go.mod)
+[![License](https://img.shields.io/github/license/sarathsp06/schemagen)](https://github.com/sarathsp06/schemagen/blob/main/LICENSE)
+
 A robust, performant Golang library for generating random, schema-compliant JSON data from JSON Schema definitions. Perfect for testing, fuzzing, and mock data generation.
 
 ## Features
