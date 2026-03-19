@@ -6,11 +6,12 @@ A robust, performant Golang library for generating random, schema-compliant JSON
 
 - ✅ **JSON Schema Compliant**: Supports Draft 2020-12 and Draft-07
 - ✅ **Realistic Fake Data**: Uses [gofakeit](https://github.com/brianvoe/gofakeit) for generating realistic mock data
-- ✅ **Deterministic Generation**: Seedable random generation for reproducible results
-- ✅ **Type Safe**: Strong typing with Go structs
-- ✅ **Comprehensive**: Supports most JSON Schema keywords
+- ✅ **Deterministic Generation**: Seedable random generation with sorted property iteration for reproducible results
+- ✅ **Type Safe**: Strong typing with `json.RawMessage`-backed polymorphic fields
+- ✅ **Comprehensive Validation**: Collects all schema errors via `ValidationErrors`, validates negative constraints, required-in-properties, and more
+- ✅ **Context Support**: Full `context.Context` propagation for cancellation and timeouts
 - ✅ **Configurable**: Control depth limits, field generation, and more
-- ✅ **Well Tested**: Extensive test coverage
+- ✅ **Well Tested**: 93%+ test coverage
 
 ## Installation
 
@@ -71,6 +72,21 @@ gen := schemagen.NewGenerator().
 | `SetMaxDepth(int)` | 10 | Maximum recursion depth for nested objects |
 | `SetGenerateAllFields(bool)` | false | Generate all fields vs. only required ones |
 
+## Concurrency
+
+A `Generator` instance is **not** safe for concurrent use by multiple goroutines. Each goroutine should create its own `Generator` instance:
+
+```go
+// Correct: each goroutine gets its own generator
+for i := 0; i < 10; i++ {
+    go func() {
+        gen := schemagen.NewGenerator()
+        result, _ := gen.Generate([]byte(schema))
+        // ...
+    }()
+}
+```
+
 ## Supported JSON Schema Keywords
 
 ### Type Keywords
@@ -115,6 +131,7 @@ gen := schemagen.NewGenerator().
 | `items` | ✅ | Schema for array items (single or tuple) |
 | `minItems` | ✅ | `{"type": "array", "minItems": 2}` |
 | `maxItems` | ✅ | `{"type": "array", "maxItems": 10}` |
+| `uniqueItems` | ✅ | `{"type": "array", "uniqueItems": true}` |
 
 ### Composition Keywords
 
@@ -122,7 +139,8 @@ gen := schemagen.NewGenerator().
 |---------|---------|----------|
 | `oneOf` | ✅ | Randomly select one sub-schema |
 | `anyOf` | ✅ | Randomly select one sub-schema |
-| `allOf` | ✅ | Generate from first schema (MVP) |
+| `allOf` | ✅ | Merge properties and required fields from all sub-schemas |
+| `not` | ✅ | Parsed and stored (used for validation tooling) |
 
 ### Supported Formats
 
@@ -224,20 +242,76 @@ schema := `{
 }`
 ```
 
+### Generate from a Pre-Parsed Schema
+
+```go
+schema, err := schemagen.ParseSchema([]byte(`{
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer", "minimum": 0, "maximum": 120}
+    },
+    "required": ["name"]
+}`))
+if err != nil {
+    log.Fatal(err)
+}
+
+gen := schemagen.NewGenerator()
+result, err := gen.GenerateFromSchema(schema)
+```
+
+### Context-Aware Generation
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+gen := schemagen.NewGenerator()
+result, err := gen.GenerateWithContext(ctx, []byte(schema))
+if err != nil {
+    // May be context.DeadlineExceeded or context.Canceled
+    log.Printf("Generation failed: %v", err)
+}
+```
+
 ## Error Handling
 
-The library validates schemas and returns errors for:
+The library validates schemas and returns detailed errors for:
 
 - Invalid JSON Schema syntax
 - Conflicting constraints (e.g., `minimum > maximum`)
+- Negative constraint values (e.g., negative `minLength`, `maxItems`)
+- Non-positive `multipleOf`
+- Required fields not defined in `properties`
+- Impossible `multipleOf` ranges
 - Maximum recursion depth exceeded
-- Unsupported schema features
+- Context cancellation and timeouts
+
+### ValidationErrors
+
+`Validate()` returns a `ValidationErrors` value (which implements the `error` interface) containing **all** validation errors found in the schema, not just the first one:
+
+```go
+schema, _ := schemagen.ParseSchema([]byte(`{
+    "type": "object",
+    "properties": {
+        "bad_string": {"type": "string", "minLength": 10, "maxLength": 5},
+        "bad_number": {"type": "number", "minimum": 100, "maximum": 50}
+    }
+}`))
+
+err := schema.Validate()
+if err != nil {
+    // err is a ValidationErrors containing both constraint violations
+    fmt.Println(err) // "2 validation errors: [minLength (10) > maxLength (5); minimum (100) > maximum (50)]"
+}
+```
 
 ```go
 gen := schemagen.NewGenerator().SetMaxDepth(3)
 result, err := gen.Generate([]byte(deeplyNestedSchema))
 if err != nil {
-    // Handle error: might be depth exceeded or invalid schema
     log.Printf("Generation failed: %v", err)
 }
 ```
@@ -247,8 +321,7 @@ if err != nil {
 ### Current Limitations
 
 - **$ref**: Reference resolution not yet implemented (future enhancement)
-- **allOf**: Currently generates from first schema only (complete merge planned)
-- **additionalProperties**: Limited support (generates 0-2 extra properties when enabled)
+- **`not` keyword**: Parsed and stored but not enforced during generation
 
 ### Edge Cases
 
@@ -296,7 +369,7 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 Future enhancements planned:
 
 - [ ] Full `$ref` and definitions support
-- [ ] Complete `allOf` schema merging
+- [ ] `not` keyword enforcement during generation
 - [ ] More format types (email variants, phone numbers, etc.)
 - [ ] Custom format handlers
 - [ ] Performance optimizations for large schemas
