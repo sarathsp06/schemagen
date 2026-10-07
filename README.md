@@ -9,14 +9,15 @@ A robust, performant Golang library for generating random, schema-compliant JSON
 
 ## Features
 
-- ✅ **JSON Schema Compliant**: Supports Draft 2020-12 and Draft-07
-- ✅ **Realistic Fake Data**: Uses [gofakeit](https://github.com/brianvoe/gofakeit) for generating realistic mock data
+- ✅ **JSON Schema Compliant**: Supports Draft 2020-12 and Draft-07, including `$ref`, `prefixItems`, `contains`, `patternProperties`, `dependentRequired`/`dependentSchemas`, and `if`/`then`
+- ✅ **Realistic Fake Data**: Uses [gofakeit](https://github.com/brianvoe/gofakeit) for generating realistic mock data, plus `x-faker` templates and custom format handlers
 - ✅ **Deterministic Generation**: Seedable random generation with sorted property iteration for reproducible results
 - ✅ **Type Safe**: Strong typing with `json.RawMessage`-backed polymorphic fields
 - ✅ **Comprehensive Validation**: Collects all schema errors via `ValidationErrors`, validates negative constraints, required-in-properties, and more
 - ✅ **Context Support**: Full `context.Context` propagation for cancellation and timeouts
-- ✅ **Configurable**: Control depth limits, field generation, and more
-- ✅ **Well Tested**: 93%+ test coverage
+- ✅ **Configurable**: Optional-field probability, defaults/examples reuse, depth limits, strict formats, and more
+- ✅ **Bulk + CLI**: `GenerateN` for many documents from one parse, and a `schemagen` CLI emitting NDJSON
+- ✅ **Well Tested**: Unit, compliance (validated against [jsonschema/v6](https://github.com/santhosh-tekuri/jsonschema)), and fuzz tests
 
 ## Installation
 
@@ -65,8 +66,8 @@ func main() {
 ```go
 gen := schemagen.NewGenerator().
     SetSeed(12345).                  // For deterministic output
-    SetMaxDepth(10).                  // Limit recursion depth
-    SetGenerateAllFields(true)        // Generate optional fields too
+    SetMaxDepth(10).                 // Limit recursion depth
+    SetGenerateAllFields(true)       // Generate optional fields too
 ```
 
 ### Generator Options
@@ -76,6 +77,12 @@ gen := schemagen.NewGenerator().
 | `SetSeed(int64)` | Current timestamp | Set seed for deterministic generation |
 | `SetMaxDepth(int)` | 10 | Maximum recursion depth for nested objects |
 | `SetGenerateAllFields(bool)` | false | Generate all fields vs. only required ones |
+| `SetOptionalProbability(float64)` | unset | Per-optional-property inclusion probability in [0,1]; overrides `GenerateAllFields` |
+| `SetUseDefaults(bool)` | false | Return the schema's `default` value when present |
+| `SetUseExamples(bool)` | false | Return a random `examples` entry when present |
+| `SetStrictFormats(bool)` | false | Error on unknown string formats instead of falling back to a random string |
+| `SetLenientDepth(bool)` | false | Return minimal values (`{}`, `[]`, `""`, …) at the depth limit instead of erroring |
+| `RegisterFormat(name, fn)` | — | Register or override a string format generator |
 
 ## Concurrency
 
@@ -100,7 +107,11 @@ for i := 0; i < 10; i++ {
 |---------|---------|-------------|
 | `type` | ✅ | Single or array of types: `string`, `number`, `integer`, `boolean`, `object`, `array`, `null` |
 | `enum` | ✅ | Pick random value from enumerated list |
-| `const` | ✅ | Return exact constant value |
+| `const` | ✅ | Return exact constant value (including `null` and `false`) |
+| `default` | ✅ | Returned when `SetUseDefaults(true)` |
+| `examples` | ✅ | Random entry returned when `SetUseExamples(true)` |
+| `$ref` | ✅ | Local JSON pointers (`#`, `#/$defs/…`, `#/definitions/…`, nested) |
+| `x-faker` | ✅ | gofakeit template, e.g. `{"x-faker": "{firstname} {lastname}"}` |
 
 ### String Keywords
 
@@ -128,12 +139,19 @@ for i := 0; i < 10; i++ {
 | `properties` | ✅ | Define object fields with schemas |
 | `required` | ✅ | List of required field names |
 | `additionalProperties` | ✅ | Allow extra properties (boolean or schema) |
+| `patternProperties` | ✅ | Keys generated from the regex, values from the schema |
+| `propertyNames` | ✅ | Constrains invented keys for `additionalProperties` |
+| `minProperties` / `maxProperties` | ✅ | Object size kept within bounds |
+| `dependentRequired` | ✅ | Dependent fields added transitively when triggers present |
+| `dependentSchemas` | ✅ | Dependent schema applied when trigger present |
 
 ### Array Keywords
 
 | Keyword | Support | Example |
 |---------|---------|---------|
-| `items` | ✅ | Schema for array items (single or tuple) |
+| `items` | ✅ | Schema for array items (single or draft-07 tuple) |
+| `prefixItems` | ✅ | 2020-12 positional schemas; `items` applies to the rest |
+| `contains` | ✅ | With `minContains` (default 1) and `maxContains` |
 | `minItems` | ✅ | `{"type": "array", "minItems": 2}` |
 | `maxItems` | ✅ | `{"type": "array", "maxItems": 10}` |
 | `uniqueItems` | ✅ | `{"type": "array", "uniqueItems": true}` |
@@ -142,10 +160,11 @@ for i := 0; i < 10; i++ {
 
 | Keyword | Support | Behavior |
 |---------|---------|----------|
-| `oneOf` | ✅ | Randomly select one sub-schema |
-| `anyOf` | ✅ | Randomly select one sub-schema |
-| `allOf` | ✅ | Merge properties and required fields from all sub-schemas |
-| `not` | ✅ | Parsed and stored (used for validation tooling) |
+| `oneOf` | ✅ | Randomly select one sub-schema, merged with sibling keywords |
+| `anyOf` | ✅ | Randomly select one sub-schema, merged with sibling keywords |
+| `allOf` | ✅ | Deep-merge all sub-schemas (tighter constraint wins) |
+| `if` / `then` | ✅ | Always generates the `if`+`then` branch; `else` is never generated |
+| `not` | ⚠️ | Parsed and stored but not enforced during generation |
 
 ### Supported Formats
 
@@ -154,14 +173,27 @@ The library uses [gofakeit](https://github.com/brianvoe/gofakeit) to generate re
 | Format | Example Output |
 |--------|----------------|
 | `uuid` | `550e8400-e29b-41d4-a716-446655440000` |
-| `email` | `john.doe@example.com` |
+| `email` / `idn-email` | `john.doe@example.com` |
 | `date-time` | `2023-10-15T14:30:00Z` |
 | `date` | `2023-10-15` |
-| `time` | `14:30:00` |
+| `time` | `14:30:00Z` |
+| `duration` | `P3DT2H30M` |
 | `ipv4` | `192.168.1.1` |
 | `ipv6` | `2001:0db8:85a3:0000:0000:8a2e:0370:7334` |
-| `uri` / `url` | `https://example.com/path` |
-| `hostname` | `example.com` |
+| `uri` / `url` / `iri` | `https://example.com/path` |
+| `uri-reference` / `iri-reference` | `/path/to/resource?x=1` |
+| `hostname` / `idn-hostname` | `example.com` |
+| `json-pointer` | `/foo/0/bar` |
+| `relative-json-pointer` | `1/foo` |
+| `regex` | `^[a-z]{3}$` |
+
+Unknown formats fall back to a length-respecting random string, or error with `SetStrictFormats(true)`. Register your own with:
+
+```go
+gen.RegisterFormat("employee-id", func(f *gofakeit.Faker) string {
+    return fmt.Sprintf("EMP-%04d", f.Number(0, 9999))
+})
+```
 
 ## Usage Examples
 
@@ -195,6 +227,25 @@ schema := `{
 gen := schemagen.NewGenerator()
 result, _ := gen.Generate([]byte(schema))
 ```
+
+### Generate Many Documents at Once
+
+```go
+gen := schemagen.NewGenerator().SetSeed(42)
+docs, err := gen.GenerateN([]byte(schema), 100) // parses/validates once
+```
+
+### CLI
+
+```bash
+go install github.com/sarathsp06/schemagen/cmd/schemagen@latest
+
+schemagen -n 10 -seed 42 schema.json          # 10 NDJSON documents
+echo '{"type":"integer"}' | schemagen -n 3 -  # schema from stdin
+schemagen -pretty -all schema.json            # indented, all optional fields
+```
+
+Flags: `-n` count, `-seed` seed, `-all` all fields, `-p` optional-field probability, `-depth` max depth, `-pretty` indent, `-defaults` use schema defaults, `-lenient` minimal values at depth limit.
 
 ### Generate JSON Bytes
 
@@ -325,8 +376,13 @@ if err != nil {
 
 ### Current Limitations
 
-- **$ref**: Reference resolution not yet implemented (future enhancement)
+- **`$ref`**: Local JSON pointers only; external/URL references return an error
 - **`not` keyword**: Parsed and stored but not enforced during generation
+- **`else` branch**: Generation always satisfies the `if`+`then` branch; `else` output is never produced
+- **Formats vs. length**: Built-in and custom format output ignores `minLength`/`maxLength` (format wins); `pattern` with length bounds is retried best-effort
+- **`"$ref": ""`**: An explicitly empty `$ref` is indistinguishable from an absent one (Go zero value) and is treated as "no ref" rather than a root self-reference
+- **Case-insensitive keywords**: Go's `encoding/json` matches struct fields case-insensitively, so misspelled keys like `prefiXItems` are honored instead of ignored (validators correctly ignore them)
+- **`maxContains`**: Regular items may incidentally also match `contains`, so the actual match count can exceed `maxContains` — best-effort only
 
 ### Edge Cases
 
@@ -373,12 +429,10 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 Future enhancements planned:
 
-- [ ] Full `$ref` and definitions support
 - [ ] `not` keyword enforcement during generation
-- [ ] More format types (email variants, phone numbers, etc.)
-- [ ] Custom format handlers
+- [ ] External `$ref` resolution (URLs, files)
+- [ ] `else` branch generation for `if`/`then`/`else`
 - [ ] Performance optimizations for large schemas
-- [ ] CLI tool for generating test data
 
 ## Credits
 Built with:

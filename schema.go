@@ -45,14 +45,21 @@ type Schema struct {
 	Title string        `json:"title,omitempty"`
 
 	// Generic
-	Enum  []interface{} `json:"enum,omitempty"`
-	Const interface{}   `json:"const,omitempty"`
+	Enum     []interface{}     `json:"enum,omitempty"`
+	Const    json.RawMessage   `json:"const,omitempty"`
+	Default  json.RawMessage   `json:"default,omitempty"`
+	Examples []json.RawMessage `json:"examples,omitempty"`
 
 	// String
 	MinLength *int   `json:"minLength,omitempty"`
 	MaxLength *int   `json:"maxLength,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
 	Format    string `json:"format,omitempty"`
+
+	// Extensions
+	// XFaker is a gofakeit template (e.g. "{firstname} {lastname}") used to
+	// generate the value of a string schema. Non-standard "x-faker" keyword.
+	XFaker string `json:"x-faker,omitempty"`
 
 	// Number
 	Minimum          *float64 `json:"minimum,omitempty"`
@@ -62,12 +69,22 @@ type Schema struct {
 	MultipleOf       *float64 `json:"multipleOf,omitempty"`
 
 	// Object
-	Properties           map[string]*Schema `json:"properties,omitempty"`
-	Required             []string           `json:"required,omitempty"`
-	AdditionalProperties json.RawMessage    `json:"additionalProperties,omitempty"`
+	Properties           map[string]*Schema  `json:"properties,omitempty"`
+	PatternProperties    map[string]*Schema  `json:"patternProperties,omitempty"`
+	PropertyNames        *Schema             `json:"propertyNames,omitempty"`
+	Required             []string            `json:"required,omitempty"`
+	MinProperties        *int                `json:"minProperties,omitempty"`
+	MaxProperties        *int                `json:"maxProperties,omitempty"`
+	AdditionalProperties json.RawMessage     `json:"additionalProperties,omitempty"`
+	DependentRequired    map[string][]string `json:"dependentRequired,omitempty"`
+	DependentSchemas     map[string]*Schema  `json:"dependentSchemas,omitempty"`
 
 	// Array
 	Items       json.RawMessage `json:"items,omitempty"`
+	PrefixItems []*Schema       `json:"prefixItems,omitempty"`
+	Contains    *Schema         `json:"contains,omitempty"`
+	MinContains *int            `json:"minContains,omitempty"`
+	MaxContains *int            `json:"maxContains,omitempty"`
 	MinItems    *int            `json:"minItems,omitempty"`
 	MaxItems    *int            `json:"maxItems,omitempty"`
 	UniqueItems *bool           `json:"uniqueItems,omitempty"`
@@ -77,6 +94,11 @@ type Schema struct {
 	AnyOf []Schema `json:"anyOf,omitempty"`
 	AllOf []Schema `json:"allOf,omitempty"`
 	Not   *Schema  `json:"not,omitempty"`
+
+	// Conditionals
+	If   *Schema `json:"if,omitempty"`
+	Then *Schema `json:"then,omitempty"`
+	Else *Schema `json:"else,omitempty"`
 
 	// References (for future support)
 	Ref         string             `json:"$ref,omitempty"`
@@ -292,8 +314,39 @@ func (s *Schema) ValidateWithDetails(basePath string) []ValidationError {
 		})
 	}
 
-	// Validate required fields exist in properties (if properties are defined)
-	if s.Properties != nil && len(s.Required) > 0 {
+	// Validate object/array count constraints
+	for _, c := range []struct {
+		name string
+		val  *int
+	}{
+		{"minProperties", s.MinProperties},
+		{"maxProperties", s.MaxProperties},
+		{"minContains", s.MinContains},
+		{"maxContains", s.MaxContains},
+	} {
+		if c.val != nil && *c.val < 0 {
+			errors = append(errors, ValidationError{
+				Path:    basePath,
+				Message: fmt.Sprintf("%s (%d) must be non-negative", c.name, *c.val),
+			})
+		}
+	}
+	if s.MinProperties != nil && s.MaxProperties != nil && *s.MinProperties > *s.MaxProperties {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("minProperties (%d) cannot be greater than maxProperties (%d)", *s.MinProperties, *s.MaxProperties),
+		})
+	}
+	if s.MinContains != nil && s.MaxContains != nil && *s.MinContains > *s.MaxContains {
+		errors = append(errors, ValidationError{
+			Path:    basePath,
+			Message: fmt.Sprintf("minContains (%d) cannot be greater than maxContains (%d)", *s.MinContains, *s.MaxContains),
+		})
+	}
+
+	// Validate required fields exist in properties (if properties are defined,
+	// and no patternProperties/additionalProperties could supply them)
+	if s.Properties != nil && len(s.Required) > 0 && s.PatternProperties == nil && len(s.AdditionalProperties) == 0 {
 		for _, reqField := range s.Required {
 			if _, exists := s.Properties[reqField]; !exists {
 				errors = append(errors, ValidationError{
@@ -329,6 +382,44 @@ func (s *Schema) ValidateWithDetails(basePath string) []ValidationError {
 	for i, schema := range s.AllOf {
 		schemaPath := fmt.Sprintf("%s.allOf[%d]", basePath, i)
 		errors = append(errors, schema.ValidateWithDetails(schemaPath)...)
+	}
+
+	// Validate nested keyword schemas
+	for name, sub := range map[string]*Schema{
+		"propertyNames": s.PropertyNames,
+		"contains":      s.Contains,
+		"if":            s.If,
+		"then":          s.Then,
+		"else":          s.Else,
+	} {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(basePath+"."+name)...)
+		}
+	}
+	for i, sub := range s.PrefixItems {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(fmt.Sprintf("%s.prefixItems[%d]", basePath, i))...)
+		}
+	}
+	for pattern, sub := range s.PatternProperties {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(basePath+".patternProperties."+pattern)...)
+		}
+	}
+	for name, sub := range s.DependentSchemas {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(basePath+".dependentSchemas."+name)...)
+		}
+	}
+	for name, sub := range s.Defs {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(basePath+".$defs."+name)...)
+		}
+	}
+	for name, sub := range s.Definitions {
+		if sub != nil {
+			errors = append(errors, sub.ValidateWithDetails(basePath+".definitions."+name)...)
+		}
 	}
 
 	return errors

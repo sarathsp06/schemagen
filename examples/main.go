@@ -251,7 +251,7 @@ func example7() {
 
 func example8() {
 	fmt.Println("\n8. Enhanced Validation Errors:")
-	
+
 	// Example with conflicting constraints
 	invalidSchema := `{
 		"type": "object",
